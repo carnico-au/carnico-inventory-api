@@ -1,45 +1,72 @@
 """
-Carnico Inventory Sync API
-FastAPI backend for syncing ERP data to cloud inventory
+Carnico Inventory Sync API v2 - Two-way Sync Support
+Adds Products, Customers, and Settings sync with manual control
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Optional
-from datetime import datetime, date
+from typing import List, Optional, Dict, Any
+from datetime import datetime
 import os
-from supabase import create_client, Client
 import hashlib
 import json
+from supabase import create_client, Client
 
-# Initialize FastAPI
-app = FastAPI(
-    title="Carnico Inventory API",
-    description="Sync API for Carnico ERP System",
-    version="1.0.0"
-)
+# ============================================================================
+# Configuration
+# ============================================================================
+app = FastAPI(title="Carnico Inventory Sync API v2", version="2.0.0")
 
-# CORS - Allow requests from anywhere (adjust in production)
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change to specific domains in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Supabase setup
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+# Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+API_KEY = os.getenv("API_KEY", "carnico_2025_butchery_xyz789abc")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# API Key for authentication (simple approach)
-API_KEY = os.getenv("API_KEY", "carnico_sync_key_2025")  # Change this!
+# ============================================================================
+# Models
+# ============================================================================
 
-# ============================================================================
-# Pydantic Models (Request/Response schemas)
-# ============================================================================
+class Product(BaseModel):
+    product_code: str
+    ham_code: Optional[str] = None
+    name: str
+    specie: Optional[str] = None
+    grade: Optional[str] = None
+    price: float
+    expiry_days: int = 7
+    is_active: bool = True
+
+class Customer(BaseModel):
+    customer_no: str
+    customer_name: str
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: bool = True
+
+class Setting(BaseModel):
+    setting_key: str
+    setting_value: str
+    setting_type: str  # 'string', 'number', 'boolean', 'json'
+    category: str
+    description: Optional[str] = None
 
 class Label(BaseModel):
     barcode: str
@@ -59,32 +86,27 @@ class Batch(BaseModel):
     batch_id: int
     date: str
     customer_name: Optional[str] = None
-    customer_no: Optional[int] = None
+    customer_no: Optional[str] = None
     specie: Optional[str] = None
     grade: Optional[str] = None
-    status: str = "open"
+    status: str = "Open"
     total_weight: float = 0
     total_amount: float = 0
     labels: List[Label] = []
 
 class ActivityLog(BaseModel):
     action: str
-    batch_id: Optional[int] = None
-    barcode: Optional[str] = None
-    product: Optional[str] = None
-    weight: Optional[float] = None
-    price: Optional[float] = None
+    timestamp: str
     user: Optional[str] = None
-    timestamp: Optional[str] = None
-    metadata: Optional[dict] = None
+    details: Optional[Dict[str, Any]] = None
 
 class DeletionLog(BaseModel):
-    serial_number: str
+    barcode: str
     product_name: str
     weight: float
-    total_price: float
-    batch_number: str
-    original_timestamp: str
+    total_price: str
+    batch_id: int
+    timestamp: str
     deleted_at: str
     deleted_by: str
 
@@ -93,27 +115,26 @@ class DeletionLog(BaseModel):
 # ============================================================================
 
 def verify_api_key(x_api_key: str = Header(...)):
-    """Verify API key from header"""
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
     return x_api_key
 
 # ============================================================================
-# Helper Functions
+# Utility Functions
 # ============================================================================
 
 def calculate_hash(data: dict) -> str:
-    """Calculate MD5 hash of data for change detection"""
+    """Calculate hash of data for change detection"""
     json_str = json.dumps(data, sort_keys=True)
-    return hashlib.md5(json_str.encode()).hexdigest()
+    return hashlib.sha256(json_str.encode()).hexdigest()
 
-def needs_sync(entity_type: str, entity_id: str, current_hash: str) -> bool:
+def needs_sync(entity_type: str, entity_id: str, new_hash: str) -> bool:
     """Check if entity needs syncing based on hash"""
     try:
         result = supabase.table('sync_status').select('sync_hash').eq('entity_type', entity_type).eq('entity_id', entity_id).execute()
-        if not result.data:
-            return True
-        return result.data[0]['sync_hash'] != current_hash
+        if result.data:
+            return result.data[0]['sync_hash'] != new_hash
+        return True
     except:
         return True
 
@@ -127,42 +148,237 @@ def update_sync_status(entity_type: str, entity_id: str, sync_hash: str, status:
             'status': status,
             'error_message': error,
             'last_synced_at': datetime.now().isoformat()
-        }).execute()
+        }, on_conflict='entity_type,entity_id').execute()
     except Exception as e:
         print(f"Failed to update sync status: {e}")
 
 # ============================================================================
-# API Endpoints
+# Health Check
 # ============================================================================
 
 @app.get("/")
 def root():
     """Health check"""
     return {
-        "status": "online",
-        "service": "Carnico Inventory API",
-        "version": "1.0.0",
-        "timestamp": datetime.now().isoformat()
+        "status": "ok",
+        "service": "Carnico Inventory Sync API v2",
+        "version": "2.0.0",
+        "features": ["batches", "labels", "products", "customers", "settings", "two-way-sync"]
     }
 
 @app.get("/health")
-def health_check():
+def health():
     """Detailed health check"""
     try:
-        # Test database connection
-        supabase.table('batches').select('count').limit(1).execute()
-        db_status = "connected"
+        # Test Supabase connection
+        supabase.table('batches').select('batch_id').limit(1).execute()
+        return {
+            "status": "healthy",
+            "database": "connected",
+            "timestamp": datetime.now().isoformat()
+        }
     except Exception as e:
-        db_status = f"error: {str(e)}"
-    
-    return {
-        "api": "online",
-        "database": db_status,
-        "timestamp": datetime.now().isoformat()
-    }
+        return {
+            "status": "unhealthy",
+            "database": "disconnected",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
 
 # ============================================================================
-# Batch Endpoints
+# Products Endpoints (Two-way sync)
+# ============================================================================
+
+@app.get("/api/products", dependencies=[Depends(verify_api_key)])
+def get_products(active_only: bool = True):
+    """Get all products"""
+    try:
+        query = supabase.table('products').select('*').order('name')
+        if active_only:
+            query = query.eq('is_active', True)
+        result = query.execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "products": result.data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/products/sync", dependencies=[Depends(verify_api_key)])
+def sync_products(products: List[Product]):
+    """Sync products from ERP to cloud (push)"""
+    try:
+        synced_count = 0
+        for product in products:
+            product_record = {
+                'product_code': product.product_code,
+                'ham_code': product.ham_code,
+                'name': product.name,
+                'specie': product.specie,
+                'grade': product.grade,
+                'price': product.price,
+                'expiry_days': product.expiry_days,
+                'is_active': product.is_active,
+                'last_sync_at': datetime.now().isoformat()
+            }
+            supabase.table('products').upsert(product_record, on_conflict='product_code').execute()
+            synced_count += 1
+        
+        return {
+            "status": "success",
+            "message": f"Synced {synced_count} products",
+            "count": synced_count
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+
+@app.get("/api/products/pull", dependencies=[Depends(verify_api_key)])
+def pull_products(since: Optional[str] = None):
+    """Pull products from cloud to ERP"""
+    try:
+        query = supabase.table('products').select('*').order('updated_at', desc=True)
+        if since:
+            query = query.gt('updated_at', since)
+        result = query.execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "products": result.data,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# Customers Endpoints (Two-way sync)
+# ============================================================================
+
+@app.get("/api/customers", dependencies=[Depends(verify_api_key)])
+def get_customers(active_only: bool = True):
+    """Get all customers"""
+    try:
+        query = supabase.table('customers').select('*').order('customer_name')
+        if active_only:
+            query = query.eq('is_active', True)
+        result = query.execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "customers": result.data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/customers/sync", dependencies=[Depends(verify_api_key)])
+def sync_customers(customers: List[Customer]):
+    """Sync customers from ERP to cloud (push)"""
+    try:
+        synced_count = 0
+        for customer in customers:
+            customer_record = {
+                'customer_no': customer.customer_no,
+                'customer_name': customer.customer_name,
+                'contact_person': customer.contact_person,
+                'phone': customer.phone,
+                'email': customer.email,
+                'address': customer.address,
+                'notes': customer.notes,
+                'is_active': customer.is_active,
+                'last_sync_at': datetime.now().isoformat()
+            }
+            supabase.table('customers').upsert(customer_record, on_conflict='customer_no').execute()
+            synced_count += 1
+        
+        return {
+            "status": "success",
+            "message": f"Synced {synced_count} customers",
+            "count": synced_count
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+
+@app.get("/api/customers/pull", dependencies=[Depends(verify_api_key)])
+def pull_customers(since: Optional[str] = None):
+    """Pull customers from cloud to ERP"""
+    try:
+        query = supabase.table('customers').select('*').order('updated_at', desc=True)
+        if since:
+            query = query.gt('updated_at', since)
+        result = query.execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "customers": result.data,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# Settings Endpoints (Two-way sync)
+# ============================================================================
+
+@app.get("/api/settings", dependencies=[Depends(verify_api_key)])
+def get_settings(category: Optional[str] = None):
+    """Get all settings or by category"""
+    try:
+        query = supabase.table('settings').select('*').order('setting_key')
+        if category:
+            query = query.eq('category', category)
+        result = query.execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "settings": result.data
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/settings/sync", dependencies=[Depends(verify_api_key)])
+def sync_settings(settings: List[Setting]):
+    """Sync settings from ERP to cloud (push)"""
+    try:
+        synced_count = 0
+        for setting in settings:
+            setting_record = {
+                'setting_key': setting.setting_key,
+                'setting_value': setting.setting_value,
+                'setting_type': setting.setting_type,
+                'category': setting.category,
+                'description': setting.description,
+                'last_sync_at': datetime.now().isoformat()
+            }
+            supabase.table('settings').upsert(setting_record, on_conflict='setting_key').execute()
+            synced_count += 1
+        
+        return {
+            "status": "success",
+            "message": f"Synced {synced_count} settings",
+            "count": synced_count
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+
+@app.get("/api/settings/pull", dependencies=[Depends(verify_api_key)])
+def pull_settings(since: Optional[str] = None):
+    """Pull settings from cloud to ERP"""
+    try:
+        query = supabase.table('settings').select('*').order('updated_at', desc=True)
+        if since:
+            query = query.gt('updated_at', since)
+        result = query.execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "settings": result.data,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# Batch Endpoints (Automatic sync)
 # ============================================================================
 
 @app.post("/api/batches/sync", dependencies=[Depends(verify_api_key)])
@@ -195,7 +411,7 @@ def sync_batch(batch: Batch):
             'last_sync_at': datetime.now().isoformat()
         }
         
-        supabase.table('batches').upsert(batch_record).execute()
+        supabase.table('batches').upsert(batch_record, on_conflict='batch_id').execute()
         
         # Sync labels
         labels_synced = 0
@@ -215,7 +431,7 @@ def sync_batch(batch: Batch):
                 'timestamp': label.timestamp,
                 'reprint_time': label.reprint_time
             }
-            supabase.table('labels').upsert(label_record).execute()
+            supabase.table('labels').upsert(label_record, on_conflict='barcode').execute()
             labels_synced += 1
         
         # Update sync status
@@ -261,7 +477,7 @@ def get_batch(batch_id: int):
             raise HTTPException(status_code=404, detail="Batch not found")
         
         # Get labels
-        labels_result = supabase.table('labels').select('*').eq('batch_id', batch_id).eq('is_deleted', False).execute()
+        labels_result = supabase.table('labels').select('*').eq('batch_id', batch_id).execute()
         
         batch = batch_result.data[0]
         batch['labels'] = labels_result.data
@@ -276,7 +492,7 @@ def get_batch(batch_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
-# Activity Log Endpoints
+# Activity Log Endpoints (Automatic sync)
 # ============================================================================
 
 @app.post("/api/activity/sync", dependencies=[Depends(verify_api_key)])
@@ -287,35 +503,26 @@ def sync_activity_logs(logs: List[ActivityLog]):
         for log in logs:
             log_record = {
                 'action': log.action,
-                'batch_id': log.batch_id,
-                'barcode': log.barcode,
-                'product': log.product,
-                'weight': log.weight,
-                'price': log.price,
+                'timestamp': log.timestamp,
                 'user_name': log.user,
-                'timestamp': log.timestamp or datetime.now().isoformat(),
-                'metadata': log.metadata
+                'details': log.details
             }
             supabase.table('activity_log').insert(log_record).execute()
             synced_count += 1
         
         return {
             "status": "success",
-            "message": f"Synced {synced_count} activity logs"
+            "message": f"Synced {synced_count} activity logs",
+            "count": synced_count
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/activity", dependencies=[Depends(verify_api_key)])
-def get_activity_logs(batch_id: Optional[int] = None, limit: int = 100):
+def get_activity_logs(limit: int = 100):
     """Get activity logs"""
     try:
-        query = supabase.table('activity_log').select('*').order('timestamp', desc=True).limit(limit)
-        
-        if batch_id:
-            query = query.eq('batch_id', batch_id)
-        
-        result = query.execute()
+        result = supabase.table('activity_log').select('*').order('timestamp', desc=True).limit(limit).execute()
         
         return {
             "status": "success",
@@ -326,7 +533,7 @@ def get_activity_logs(batch_id: Optional[int] = None, limit: int = 100):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
-# Deletion Log Endpoints
+# Deletion Log Endpoints (Automatic sync)
 # ============================================================================
 
 @app.post("/api/deletions/sync", dependencies=[Depends(verify_api_key)])
@@ -336,67 +543,36 @@ def sync_deletion_logs(logs: List[DeletionLog]):
         synced_count = 0
         for log in logs:
             log_record = {
-                'serial_number': log.serial_number,
+                'barcode': log.barcode,
                 'product_name': log.product_name,
                 'weight': log.weight,
                 'total_price': log.total_price,
-                'batch_number': log.batch_number,
-                'original_timestamp': log.original_timestamp,
+                'batch_id': log.batch_id,
+                'timestamp': log.timestamp,
                 'deleted_at': log.deleted_at,
                 'deleted_by': log.deleted_by
             }
             supabase.table('deletion_log').insert(log_record).execute()
-            
-            # Mark label as deleted
-            supabase.table('labels').update({
-                'is_deleted': True,
-                'deleted_at': log.deleted_at
-            }).eq('barcode', log.serial_number).execute()
-            
             synced_count += 1
         
         return {
             "status": "success",
-            "message": f"Synced {synced_count} deletion logs"
+            "message": f"Synced {synced_count} deletion logs",
+            "count": synced_count
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ============================================================================
-# Statistics Endpoints
-# ============================================================================
-
-@app.get("/api/stats", dependencies=[Depends(verify_api_key)])
-def get_statistics():
-    """Get inventory statistics"""
+@app.get("/api/deletions", dependencies=[Depends(verify_api_key)])
+def get_deletion_logs(limit: int = 100):
+    """Get deletion logs"""
     try:
-        # Count batches
-        total_batches = supabase.table('batches').select('count').execute()
-        open_batches = supabase.table('batches').select('count').eq('status', 'open').execute()
-        
-        # Count labels
-        total_labels = supabase.table('labels').select('count').eq('is_deleted', False).execute()
-        deleted_labels = supabase.table('labels').select('count').eq('is_deleted', True).execute()
-        
-        # Sum totals
-        totals = supabase.table('batches').select('total_weight, total_amount').execute()
-        total_weight = sum(b.get('total_weight', 0) for b in totals.data)
-        total_amount = sum(b.get('total_amount', 0) for b in totals.data)
+        result = supabase.table('deletion_log').select('*').order('deleted_at', desc=True).limit(limit).execute()
         
         return {
             "status": "success",
-            "statistics": {
-                "total_batches": len(total_batches.data) if total_batches.data else 0,
-                "open_batches": len(open_batches.data) if open_batches.data else 0,
-                "total_labels": len(total_labels.data) if total_labels.data else 0,
-                "deleted_labels": len(deleted_labels.data) if deleted_labels.data else 0,
-                "total_weight_kg": round(total_weight, 3),
-                "total_value": round(total_amount, 2)
-            }
+            "count": len(result.data),
+            "logs": result.data
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
