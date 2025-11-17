@@ -398,17 +398,8 @@ def pull_settings(since: Optional[str] = None):
 def sync_batch(batch: Batch):
     """Sync a batch with all its labels"""
     try:
-        # Include labels in hash so label changes trigger sync
-        batch_data = batch.dict()
-        batch_hash = calculate_hash(batch_data)
-        
-        # Check if sync needed
-        if not needs_sync('batch', str(batch.batch_id), batch_hash):
-            return {
-                "status": "skipped",
-                "message": "Batch unchanged, no sync needed",
-                "batch_id": batch.batch_id
-            }
+        # Always sync - removed hash check to ensure all changes are captured
+        # Hash-based optimization was causing issues with label movements
         
         # Upsert batch
         batch_record = {
@@ -467,9 +458,6 @@ def sync_batch(batch: Batch):
             print(f"DEBUG: Label upsert result: {result}")
             labels_synced += 1
         
-        # Update sync status
-        update_sync_status('batch', str(batch.batch_id), batch_hash, 'synced')
-        
         return {
             "status": "success",
             "message": "Batch synced successfully",
@@ -478,7 +466,6 @@ def sync_batch(batch: Batch):
         }
         
     except Exception as e:
-        update_sync_status('batch', str(batch.batch_id), batch_hash, 'failed', str(e))
         raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
 
 @app.get("/api/batches", dependencies=[Depends(verify_api_key)])
