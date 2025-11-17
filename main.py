@@ -433,11 +433,14 @@ def sync_batch(batch: Batch):
         # Get current labels from ERP batch
         current_barcodes = {label.barcode for label in batch.labels}
         
-        # Mark labels as deleted if they're no longer in the batch
-        deleted_barcodes = existing_barcodes - current_barcodes
-        if deleted_barcodes:
-            for barcode in deleted_barcodes:
-                supabase.table('labels').update({'is_deleted': True}).eq('barcode', barcode).execute()
+        # Mark labels not in current batch as deleted
+        for barcode in existing_barcodes - current_barcodes:
+            if barcode:  # Skip empty barcodes
+                from datetime import datetime
+                supabase.table('labels').update({
+                    'is_deleted': True,
+                    'deleted_at': datetime.now().isoformat()
+                }).eq('barcode', barcode).execute()
         
         # Sync current labels (mark as not deleted)
         labels_synced = 0
@@ -540,7 +543,7 @@ def sync_activity_logs(logs: List[ActivityLog]):
             price = details.get('price')
             price_per_kg = details.get('price_per_kg')
             
-            print(f"DEBUG: Activity log - action={log.action}, batch_id={batch_id}, barcode={barcode}, product={product}")
+            print(f"DEBUG: Activity log - action={log.action}, batch_id={batch_id}, barcode={barcode}, product={product}, price_per_kg={price_per_kg}")
             
             log_record = {
                 'action': log.action,
@@ -551,10 +554,11 @@ def sync_activity_logs(logs: List[ActivityLog]):
                 'product': product,
                 'weight': weight,
                 'price': price,
+                'price_per_kg': price_per_kg,  # Add as column
                 'details': log.details
             }
             
-            # Add price_per_kg to details if not already there
+            # Ensure price_per_kg is in details JSON too
             if price_per_kg and isinstance(log_record['details'], dict):
                 log_record['details']['price_per_kg'] = price_per_kg
             
