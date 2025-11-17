@@ -398,7 +398,8 @@ def pull_settings(since: Optional[str] = None):
 def sync_batch(batch: Batch):
     """Sync a batch with all its labels"""
     try:
-        batch_data = batch.dict(exclude={'labels'})
+        # Include labels in hash so label changes trigger sync
+        batch_data = batch.dict()
         batch_hash = calculate_hash(batch_data)
         
         # Check if sync needed
