@@ -103,12 +103,25 @@ class ActivityLog(BaseModel):
 class DeletionLog(BaseModel):
     barcode: str
     product_name: str
+    product_code: Optional[str] = None
+    ham_code: Optional[str] = None
+    grade: Optional[str] = None
+    specie: Optional[str] = None
     weight: float
+    price_per_kg: Optional[float] = None
     total_price: str
+    packed_date: Optional[str] = None
+    expiry_date: Optional[str] = None
+    company_name: Optional[str] = None
+    template: Optional[str] = None
     batch_id: int
     timestamp: str
     deleted_at: str
     deleted_by: str
+    reinstated_at: Optional[str] = None
+    customer: Optional[str] = None
+    reinstated_by: Optional[str] = None
+    reinstated_to_batch: Optional[int] = None
 
 # ============================================================================
 # Authentication
@@ -413,7 +426,20 @@ def sync_batch(batch: Batch):
         
         supabase.table('batches').upsert(batch_record, on_conflict='batch_id').execute()
         
-        # Sync labels
+        # Get existing labels for this batch from database
+        existing_labels_result = supabase.table('labels').select('barcode').eq('batch_id', batch.batch_id).execute()
+        existing_barcodes = {label['barcode'] for label in existing_labels_result.data}
+        
+        # Get current labels from ERP batch
+        current_barcodes = {label.barcode for label in batch.labels}
+        
+        # Mark labels as deleted if they're no longer in the batch
+        deleted_barcodes = existing_barcodes - current_barcodes
+        if deleted_barcodes:
+            for barcode in deleted_barcodes:
+                supabase.table('labels').update({'is_deleted': True}).eq('barcode', barcode).execute()
+        
+        # Sync current labels (mark as not deleted)
         labels_synced = 0
         for label in batch.labels:
             label_record = {
@@ -429,9 +455,12 @@ def sync_batch(batch: Batch):
                 'packed_date': label.packed_date,
                 'expiry_date': label.expiry_date,
                 'timestamp': label.timestamp,
-                'reprint_time': label.reprint_time
+                'reprint_time': label.reprint_time,
+                'is_deleted': False  # Ensure active labels are marked as not deleted
             }
-            supabase.table('labels').upsert(label_record, on_conflict='barcode').execute()
+            print(f"DEBUG: Upserting label: barcode={label.barcode}, reprint_time={label.reprint_time}")
+            result = supabase.table('labels').upsert(label_record, on_conflict='barcode').execute()
+            print(f"DEBUG: Label upsert result: {result}")
             labels_synced += 1
         
         # Update sync status
@@ -501,13 +530,36 @@ def sync_activity_logs(logs: List[ActivityLog]):
     try:
         synced_count = 0
         for log in logs:
+            details = log.details if isinstance(log.details, dict) else {}
+            
+            # Extract fields from details
+            batch_id = details.get('batch_id')
+            barcode = details.get('barcode')
+            product = details.get('product')
+            weight = details.get('weight')
+            price = details.get('price')
+            price_per_kg = details.get('price_per_kg')
+            
+            print(f"DEBUG: Activity log - action={log.action}, batch_id={batch_id}, barcode={barcode}, product={product}")
+            
             log_record = {
                 'action': log.action,
                 'timestamp': log.timestamp,
                 'user_name': log.user,
+                'batch_id': batch_id,
+                'barcode': barcode,
+                'product': product,
+                'weight': weight,
+                'price': price,
                 'details': log.details
             }
-            supabase.table('activity_log').insert(log_record).execute()
+            
+            # Add price_per_kg to details if not already there
+            if price_per_kg and isinstance(log_record['details'], dict):
+                log_record['details']['price_per_kg'] = price_per_kg
+            
+            result = supabase.table('activity_log').insert(log_record).execute()
+            print(f"DEBUG: Activity log insert result: {result}")
             synced_count += 1
         
         return {
@@ -544,15 +596,32 @@ def sync_deletion_logs(logs: List[DeletionLog]):
         for log in logs:
             log_record = {
                 'barcode': log.barcode,
-                'product_name': log.product_name,
-                'weight': log.weight,
-                'total_price': log.total_price,
                 'batch_id': log.batch_id,
                 'timestamp': log.timestamp,
+                'product_name': log.product_name,
+                'product_code': log.product_code,
+                'ham_code': log.ham_code,
+                'grade': log.grade,
+                'specie': log.specie,
+                'weight': log.weight,
+                'price_per_kg': log.price_per_kg,
+                'total_price': log.total_price,
+                'packed_date': log.packed_date,
+                'expiry_date': log.expiry_date,
+                'company_name': log.company_name,
+                'template': log.template,
                 'deleted_at': log.deleted_at,
-                'deleted_by': log.deleted_by
+                'deleted_by': log.deleted_by,
+                'reinstated_at': log.reinstated_at,
+                'customer': log.customer,
+                'reinstated_by': log.reinstated_by,
+                'reinstated_to_batch': log.reinstated_to_batch
             }
-            supabase.table('deletion_log').insert(log_record).execute()
+            # DEBUG: Print what we're upserting
+            print(f"DEBUG: Upserting deletion log: barcode={log.barcode}, product_code={log.product_code}, ham_code={log.ham_code}")
+            # Use upsert to prevent duplicates and allow updates for reinstatement
+            result = supabase.table('deletion_log').upsert(log_record, on_conflict='barcode,deleted_at').execute()
+            print(f"DEBUG: Upsert result: {result}")
             synced_count += 1
         
         return {
@@ -561,6 +630,7 @@ def sync_deletion_logs(logs: List[DeletionLog]):
             "count": synced_count
         }
     except Exception as e:
+        print(f"ERROR syncing deletion logs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/deletions", dependencies=[Depends(verify_api_key)])
