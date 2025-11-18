@@ -416,7 +416,13 @@ def sync_batch(batch: Batch):
             'last_sync_at': datetime.now().isoformat()
         }
         
-        supabase.table('batches').upsert(batch_record, on_conflict='batch_id').execute()
+        print(f"DEBUG: Upserting batch {batch.batch_id}: {batch_record}")
+        batch_result = supabase.table('batches').upsert(batch_record, on_conflict='batch_id').execute()
+        print(f"DEBUG: Batch upsert result: {batch_result}")
+        
+        if not batch_result.data:
+            print(f"ERROR: Batch upsert returned no data for batch {batch.batch_id}")
+            raise Exception(f"Failed to upsert batch {batch.batch_id} - no data returned")
         
         # Get existing labels for this batch from database
         existing_labels_result = supabase.table('labels').select('barcode').eq('batch_id', batch.batch_id).execute()
