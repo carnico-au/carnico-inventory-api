@@ -516,6 +516,30 @@ def get_batch(batch_id: int):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.delete("/api/batches/{batch_id}", dependencies=[Depends(verify_api_key)])
+def delete_batch(batch_id: int):
+    """Delete a batch and all its labels from Supabase"""
+    try:
+        # First delete all labels associated with this batch
+        labels_result = supabase.table('labels').delete().eq('batch_id', batch_id).execute()
+        labels_deleted = len(labels_result.data) if labels_result.data else 0
+        
+        # Then delete the batch itself
+        batch_result = supabase.table('batches').delete().eq('batch_id', batch_id).execute()
+        
+        if not batch_result.data:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        
+        return {
+            "status": "success",
+            "message": f"Batch #{batch_id} deleted successfully",
+            "labels_deleted": labels_deleted
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============================================================================
 # Activity Log Endpoints (Automatic sync)
 # ============================================================================
