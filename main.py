@@ -516,9 +516,30 @@ def get_batch(batch_id: int):
 
 @app.post("/api/activity/sync", dependencies=[Depends(verify_api_key)])
 def sync_activity_logs(logs: List[ActivityLog]):
-    """Sync multiple activity log entries"""
+    """Sync multiple activity log entries - optimized batch insert"""
     try:
-        synced_count = 0
+        if not logs:
+            return {"status": "success", "message": "No logs to sync", "count": 0}
+        
+        # Get existing log timestamps to avoid duplicates
+        # Only check recent logs (last 7 days) for performance
+        from datetime import datetime, timedelta
+        seven_days_ago = (datetime.now() - timedelta(days=7)).isoformat()
+        existing_result = supabase.table('activity_log')\
+            .select('timestamp, action, batch_id, barcode')\
+            .gte('timestamp', seven_days_ago)\
+            .execute()
+        
+        # Create set of existing log signatures (timestamp + action + batch_id + barcode)
+        existing_signatures = {
+            (log['timestamp'], log['action'], log.get('batch_id'), log.get('barcode'))
+            for log in existing_result.data
+        }
+        
+        # Prepare batch insert records
+        log_records = []
+        skipped = 0
+        
         for log in logs:
             details = log.details if isinstance(log.details, dict) else {}
             
@@ -530,7 +551,11 @@ def sync_activity_logs(logs: List[ActivityLog]):
             price = details.get('price')
             price_per_kg = details.get('price_per_kg')
             
-            print(f"DEBUG: Activity log - action={log.action}, batch_id={batch_id}, barcode={barcode}, product={product}, price_per_kg={price_per_kg}")
+            # Check if this log already exists
+            signature = (log.timestamp, log.action, batch_id, barcode)
+            if signature in existing_signatures:
+                skipped += 1
+                continue
             
             log_record = {
                 'action': log.action,
@@ -541,7 +566,7 @@ def sync_activity_logs(logs: List[ActivityLog]):
                 'product': product,
                 'weight': weight,
                 'price': price,
-                'price_per_kg': price_per_kg,  # Add as column
+                'price_per_kg': price_per_kg,
                 'details': log.details
             }
             
@@ -549,14 +574,25 @@ def sync_activity_logs(logs: List[ActivityLog]):
             if price_per_kg and isinstance(log_record['details'], dict):
                 log_record['details']['price_per_kg'] = price_per_kg
             
-            result = supabase.table('activity_log').insert(log_record).execute()
-            print(f"DEBUG: Activity log insert result: {result}")
-            synced_count += 1
+            log_records.append(log_record)
+        
+        # Batch insert all new logs at once (much faster)
+        synced_count = 0
+        if log_records:
+            # Insert in chunks of 1000 to avoid payload size limits
+            chunk_size = 1000
+            for i in range(0, len(log_records), chunk_size):
+                chunk = log_records[i:i + chunk_size]
+                result = supabase.table('activity_log').insert(chunk).execute()
+                synced_count += len(chunk)
+        
+        print(f"Activity sync: {synced_count} inserted, {skipped} skipped (duplicates)")
         
         return {
             "status": "success",
-            "message": f"Synced {synced_count} activity logs",
-            "count": synced_count
+            "message": f"Synced {synced_count} activity logs ({skipped} duplicates skipped)",
+            "count": synced_count,
+            "skipped": skipped
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
