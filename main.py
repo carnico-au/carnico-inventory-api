@@ -428,7 +428,6 @@ def sync_batch(batch: Batch):
         # Mark labels not in current batch as deleted
         for barcode in existing_barcodes - current_barcodes:
             if barcode:  # Skip empty barcodes
-                from datetime import datetime
                 supabase.table('labels').update({
                     'is_deleted': True,
                     'deleted_at': datetime.now().isoformat()
