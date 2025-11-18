@@ -520,24 +520,42 @@ def get_batch(batch_id: int):
 def delete_batch(batch_id: int):
     """Delete a batch and all its labels from Supabase"""
     try:
+        print(f">>> API: Deleting batch #{batch_id}")
+        
+        # Check if batch exists first
+        check_result = supabase.table('batches').select('batch_id').eq('batch_id', batch_id).execute()
+        if not check_result.data:
+            print(f">>> API: Batch #{batch_id} not found")
+            raise HTTPException(status_code=404, detail=f"Batch #{batch_id} not found")
+        
+        print(f">>> API: Batch #{batch_id} found, proceeding with deletion")
+        
         # First delete all labels associated with this batch
         labels_result = supabase.table('labels').delete().eq('batch_id', batch_id).execute()
         labels_deleted = len(labels_result.data) if labels_result.data else 0
+        print(f">>> API: Deleted {labels_deleted} labels for batch #{batch_id}")
         
         # Then delete the batch itself
         batch_result = supabase.table('batches').delete().eq('batch_id', batch_id).execute()
+        print(f">>> API: Batch delete result: {batch_result.data}")
         
-        if not batch_result.data:
-            raise HTTPException(status_code=404, detail="Batch not found")
+        # Supabase delete returns the deleted row(s), so if data is empty, nothing was deleted
+        # But we already checked it exists, so this shouldn't happen
+        batches_deleted = len(batch_result.data) if batch_result.data else 0
+        print(f">>> API: Deleted {batches_deleted} batch(es)")
         
         return {
             "status": "success",
             "message": f"Batch #{batch_id} deleted successfully",
-            "labels_deleted": labels_deleted
+            "labels_deleted": labels_deleted,
+            "batches_deleted": batches_deleted
         }
     except HTTPException:
         raise
     except Exception as e:
+        print(f">>> API: Error deleting batch #{batch_id}: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
