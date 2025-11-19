@@ -751,6 +751,78 @@ def get_all_products():
         print(f">>> API: Error fetching products: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/products", dependencies=[Depends(verify_api_key)])
+def create_product(product: Product):
+    """Create a new product"""
+    try:
+        product_dict = product.dict()
+        result = supabase.table('products').insert(product_dict).execute()
+        
+        # Log activity
+        log_entry = {
+            'action': 'add_product_web',
+            'timestamp': datetime.now().isoformat(),
+            'user': 'webapp',
+            'details': {'product_code': product.product_code, 'name': product.name}
+        }
+        supabase.table('activity_log').insert(log_entry).execute()
+        
+        return {"status": "success", "product": result.data[0]}
+    except Exception as e:
+        print(f">>> API: Error creating product: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/products/{product_code}", dependencies=[Depends(verify_api_key)])
+def update_product(product_code: str, product: Product):
+    """Update an existing product"""
+    try:
+        product_dict = product.dict()
+        result = supabase.table('products').update(product_dict).eq('product_code', product_code).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Product {product_code} not found")
+        
+        # Log activity
+        log_entry = {
+            'action': 'update_product_web',
+            'timestamp': datetime.now().isoformat(),
+            'user': 'webapp',
+            'details': {'product_code': product_code}
+        }
+        supabase.table('activity_log').insert(log_entry).execute()
+        
+        return {"status": "success", "product": result.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f">>> API: Error updating product: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/products/{product_code}", dependencies=[Depends(verify_api_key)])
+def delete_product(product_code: str):
+    """Delete a product"""
+    try:
+        result = supabase.table('products').delete().eq('product_code', product_code).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Product {product_code} not found")
+        
+        # Log activity
+        log_entry = {
+            'action': 'delete_product_web',
+            'timestamp': datetime.now().isoformat(),
+            'user': 'webapp',
+            'details': {'product_code': product_code}
+        }
+        supabase.table('activity_log').insert(log_entry).execute()
+        
+        return {"status": "success", "message": f"Product {product_code} deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f">>> API: Error deleting product: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/customers", dependencies=[Depends(verify_api_key)])
 def get_all_customers():
     """Get all customers from Supabase"""
@@ -765,10 +837,102 @@ def get_all_customers():
         print(f">>> API: Error fetching customers: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/customers", dependencies=[Depends(verify_api_key)])
+def create_customer(customer: Customer):
+    """Create a new customer"""
+    try:
+        customer_dict = customer.dict()
+        result = supabase.table('customers').insert(customer_dict).execute()
+        
+        # Log activity
+        log_entry = {
+            'action': 'add_customer_web',
+            'timestamp': datetime.now().isoformat(),
+            'user': 'webapp',
+            'details': {'customer_no': customer.customer_no, 'name': customer.customer_name}
+        }
+        supabase.table('activity_log').insert(log_entry).execute()
+        
+        return {"status": "success", "customer": result.data[0]}
+    except Exception as e:
+        print(f">>> API: Error creating customer: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/customers/{customer_no}", dependencies=[Depends(verify_api_key)])
+def update_customer(customer_no: str, customer: Customer):
+    """Update an existing customer"""
+    try:
+        customer_dict = customer.dict()
+        result = supabase.table('customers').update(customer_dict).eq('customer_no', customer_no).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Customer {customer_no} not found")
+        
+        # Log activity
+        log_entry = {
+            'action': 'update_customer_web',
+            'timestamp': datetime.now().isoformat(),
+            'user': 'webapp',
+            'details': {'customer_no': customer_no}
+        }
+        supabase.table('activity_log').insert(log_entry).execute()
+        
+        return {"status": "success", "customer": result.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f">>> API: Error updating customer: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/customers/{customer_no}", dependencies=[Depends(verify_api_key)])
+def delete_customer(customer_no: str):
+    """Delete a customer"""
+    try:
+        result = supabase.table('customers').delete().eq('customer_no', customer_no).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Customer {customer_no} not found")
+        
+        # Log activity
+        log_entry = {
+            'action': 'delete_customer_web',
+            'timestamp': datetime.now().isoformat(),
+            'user': 'webapp',
+            'details': {'customer_no': customer_no}
+        }
+        supabase.table('activity_log').insert(log_entry).execute()
+        
+        return {"status": "success", "message": f"Customer {customer_no} deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f">>> API: Error deleting customer: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ============================================================================
 # Activity Log Endpoints (Automatic sync)
 # ============================================================================
+
+@app.get("/api/activity", dependencies=[Depends(verify_api_key)])
+def get_activity_logs(limit: int = 100, action: Optional[str] = None):
+    """Get recent activity logs with optional filtering"""
+    try:
+        query = supabase.table('activity_log').select('*')
+        
+        if action:
+            query = query.eq('action', action)
+        
+        result = query.order('timestamp', desc=True).limit(limit).execute()
+        
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "activities": result.data
+        }
+    except Exception as e:
+        print(f">>> API: Error fetching activity logs: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/activity/sync", dependencies=[Depends(verify_api_key)])
 def sync_activity_logs(logs: List[ActivityLog]):
