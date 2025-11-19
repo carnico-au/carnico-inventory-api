@@ -626,11 +626,11 @@ def get_dashboard_stats():
         labels_today_count = labels_today_result.count if labels_today_result.count is not None else 0
 
         # 3. Get total products count
-        products_result = supabase.table('products').select('id', count='exact').execute()
+        products_result = supabase.table('products').select('*', count='exact').execute()
         products_count = products_result.count if products_result.count is not None else 0
 
         # 4. Get recent activity count (today)
-        activity_today_result = supabase.table('activity_log').select('id', count='exact').gte('timestamp', today_start.isoformat()).lt('timestamp', today_end.isoformat()).execute()
+        activity_today_result = supabase.table('activity_log').select('*', count='exact').gte('timestamp', today_start.isoformat()).lt('timestamp', today_end.isoformat()).execute()
         activity_today_count = activity_today_result.count if activity_today_result.count is not None else 0
         
         return {
