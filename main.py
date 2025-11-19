@@ -3,14 +3,17 @@ Carnico Inventory Sync API v2 - Two-way Sync Support
 Adds Products, Customers, and Settings sync with manual control
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import os
 import hashlib
 import json
+import csv
+import io
 from supabase import create_client, Client
 
 # ============================================================================
@@ -102,13 +105,16 @@ class ActivityLog(BaseModel):
 
 class CreateBatch(BaseModel):
     customer: str
+    customer_no: Optional[str] = None
     specie: str
     date: str
 
 class UpdateBatch(BaseModel):
     customer: Optional[str] = None
+    customer_no: Optional[str] = None
     specie: Optional[str] = None
     status: Optional[str] = None
+    date: Optional[str] = None
 
 class DeletionLog(BaseModel):
     barcode: str
@@ -738,6 +744,7 @@ def create_new_batch(batch_data: CreateBatch):
             'batch_id': new_batch_id,
             'date': batch_data.date,
             'customer': batch_data.customer,
+            'customer_no': batch_data.customer_no,
             'specie': batch_data.specie,
             'status': 'Open',
             'label_count': 0,
@@ -773,10 +780,14 @@ def update_batch(batch_id: int, batch_data: UpdateBatch):
         update_data = {}
         if batch_data.customer is not None:
             update_data['customer'] = batch_data.customer
+        if batch_data.customer_no is not None:
+            update_data['customer_no'] = batch_data.customer_no
         if batch_data.specie is not None:
             update_data['specie'] = batch_data.specie
         if batch_data.status is not None:
             update_data['status'] = batch_data.status
+        if batch_data.date is not None:
+            update_data['date'] = batch_data.date
 
         if not update_data:
             raise HTTPException(status_code=400, detail="No fields to update")
@@ -803,6 +814,20 @@ def update_batch(batch_id: int, batch_data: UpdateBatch):
         raise
     except Exception as e:
         print(f">>> API: Error updating batch: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/labels", dependencies=[Depends(verify_api_key)])
+def get_all_labels():
+    """Get all labels"""
+    try:
+        result = supabase.table('labels').select('*').order('timestamp', desc=True).execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "labels": result.data
+        }
+    except Exception as e:
+        print(f">>> API: Error fetching labels: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/batches/{batch_id}/labels", dependencies=[Depends(verify_api_key)])
@@ -1244,4 +1269,202 @@ def get_deletion_logs(limit: int = 100):
             "logs": result.data
         }
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============================================================================
+# CSV Import/Export Endpoints
+# ============================================================================
+
+@app.get("/api/templates/products", dependencies=[Depends(verify_api_key)])
+def download_products_template():
+    """Download CSV template for products"""
+    template_data = [
+        ['product_code', 'ham_code', 'name', 'specie', 'grade', 'price', 'expiry_days', 'is_active'],
+        ['BEEF001', 'HAM001', 'Beef Sirloin', 'Beef', 'A', '25.50', '7', 'true'],
+        ['PORK001', 'HAM002', 'Pork Chops', 'Pork', 'A', '18.75', '5', 'true'],
+    ]
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerows(template_data)
+    
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=products_template.csv"}
+    )
+
+@app.get("/api/templates/customers", dependencies=[Depends(verify_api_key)])
+def download_customers_template():
+    """Download CSV template for customers"""
+    template_data = [
+        ['customer_no', 'name', 'contact_person', 'phone', 'email', 'address'],
+        ['CUST001', 'ABC Meats Ltd', 'John Smith', '555-0101', 'john@abcmeats.com', '123 Main St'],
+        ['CUST002', 'XYZ Butchery', 'Jane Doe', '555-0102', 'jane@xyzbutchery.com', '456 Oak Ave'],
+    ]
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerows(template_data)
+    
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=customers_template.csv"}
+    )
+
+@app.get("/api/templates/batches", dependencies=[Depends(verify_api_key)])
+def download_batches_template():
+    """Download CSV template for batches"""
+    template_data = [
+        ['date', 'customer', 'customer_no', 'specie', 'status'],
+        ['2024-01-15', 'ABC Meats Ltd', 'CUST001', 'Beef', 'Open'],
+        ['2024-01-16', 'XYZ Butchery', 'CUST002', 'Pork', 'Open'],
+    ]
+    
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerows(template_data)
+    
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=batches_template.csv"}
+    )
+
+@app.post("/api/import/products", dependencies=[Depends(verify_api_key)])
+async def import_products(file: UploadFile = File(...)):
+    """Import products from CSV file"""
+    try:
+        contents = await file.read()
+        decoded = contents.decode('utf-8')
+        csv_reader = csv.DictReader(io.StringIO(decoded))
+        
+        imported = 0
+        errors = []
+        
+        for row_num, row in enumerate(csv_reader, start=2):
+            try:
+                product_data = {
+                    'product_code': row['product_code'],
+                    'ham_code': row.get('ham_code') or None,
+                    'name': row['name'],
+                    'specie': row.get('specie') or None,
+                    'grade': row.get('grade') or None,
+                    'price': float(row['price']),
+                    'expiry_days': int(row.get('expiry_days', 7)),
+                    'is_active': row.get('is_active', 'true').lower() == 'true'
+                }
+                
+                # Check if product exists
+                existing = supabase.table('products').select('product_code').eq('product_code', product_data['product_code']).execute()
+                
+                if existing.data:
+                    # Update existing
+                    supabase.table('products').update(product_data).eq('product_code', product_data['product_code']).execute()
+                else:
+                    # Insert new
+                    supabase.table('products').insert(product_data).execute()
+                
+                imported += 1
+            except Exception as e:
+                errors.append(f"Row {row_num}: {str(e)}")
+        
+        # Log activity
+        log_activity("import_products", f"Imported {imported} products from CSV")
+        
+        return {
+            "status": "success",
+            "imported": imported,
+            "errors": errors
+        }
+    except Exception as e:
+        print(f">>> API: Error importing products: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/import/customers", dependencies=[Depends(verify_api_key)])
+async def import_customers(file: UploadFile = File(...)):
+    """Import customers from CSV file"""
+    try:
+        contents = await file.read()
+        decoded = contents.decode('utf-8')
+        csv_reader = csv.DictReader(io.StringIO(decoded))
+        
+        imported = 0
+        errors = []
+        
+        for row_num, row in enumerate(csv_reader, start=2):
+            try:
+                customer_data = {
+                    'customer_no': row['customer_no'],
+                    'name': row['name'],
+                    'contact_person': row.get('contact_person') or None,
+                    'phone': row.get('phone') or None,
+                    'email': row.get('email') or None,
+                    'address': row.get('address') or None
+                }
+                
+                # Check if customer exists
+                existing = supabase.table('customers').select('customer_no').eq('customer_no', customer_data['customer_no']).execute()
+                
+                if existing.data:
+                    # Update existing
+                    supabase.table('customers').update(customer_data).eq('customer_no', customer_data['customer_no']).execute()
+                else:
+                    # Insert new
+                    supabase.table('customers').insert(customer_data).execute()
+                
+                imported += 1
+            except Exception as e:
+                errors.append(f"Row {row_num}: {str(e)}")
+        
+        # Log activity
+        log_activity("import_customers", f"Imported {imported} customers from CSV")
+        
+        return {
+            "status": "success",
+            "imported": imported,
+            "errors": errors
+        }
+    except Exception as e:
+        print(f">>> API: Error importing customers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/import/batches", dependencies=[Depends(verify_api_key)])
+async def import_batches(file: UploadFile = File(...)):
+    """Import batches from CSV file"""
+    try:
+        contents = await file.read()
+        decoded = contents.decode('utf-8')
+        csv_reader = csv.DictReader(io.StringIO(decoded))
+        
+        imported = 0
+        errors = []
+        
+        for row_num, row in enumerate(csv_reader, start=2):
+            try:
+                batch_data = {
+                    'date': row['date'],
+                    'customer': row.get('customer') or None,
+                    'customer_no': row.get('customer_no') or None,
+                    'specie': row.get('specie') or None,
+                    'status': row.get('status', 'Open')
+                }
+                
+                # Insert new batch (no update for batches via CSV)
+                supabase.table('batches').insert(batch_data).execute()
+                imported += 1
+            except Exception as e:
+                errors.append(f"Row {row_num}: {str(e)}")
+        
+        # Log activity
+        log_activity("import_batches", f"Imported {imported} batches from CSV")
+        
+        return {
+            "status": "success",
+            "imported": imported,
+            "errors": errors
+        }
+    except Exception as e:
+        print(f">>> API: Error importing batches: {e}")
         raise HTTPException(status_code=500, detail=str(e))
