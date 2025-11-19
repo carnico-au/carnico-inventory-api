@@ -588,25 +588,6 @@ def get_all_products():
 
 
 # ============================================================================
-# Customers Endpoints
-# ============================================================================
-
-@app.get("/api/customers", dependencies=[Depends(verify_api_key)])
-def get_all_customers():
-    """Get all customers from Supabase"""
-    try:
-        result = supabase.table('customers').select('*').order('name').execute()
-        return {
-            "status": "success",
-            "count": len(result.data),
-            "customers": result.data
-        }
-    except Exception as e:
-        print(f">>> API: Error fetching customers: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ============================================================================
 # Web App Endpoints
 # ============================================================================
 
@@ -741,6 +722,21 @@ def update_batch(batch_id: int, batch_data: UpdateBatch):
         print(f">>> API: Error updating batch: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/batches/{batch_id}/labels", dependencies=[Depends(verify_api_key)])
+def get_batch_labels(batch_id: int):
+    """Get all labels for a specific batch"""
+    try:
+        result = supabase.table('labels').select('*').eq('batch_id', batch_id).order('barcode').execute()
+        return {
+            "status": "success",
+            "batch_id": batch_id,
+            "count": len(result.data),
+            "labels": result.data
+        }
+    except Exception as e:
+        print(f">>> API: Error fetching labels for batch #{batch_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/api/products", dependencies=[Depends(verify_api_key)])
 def get_all_products():
     """Get all products from Supabase"""
@@ -759,7 +755,7 @@ def get_all_products():
 def get_all_customers():
     """Get all customers from Supabase"""
     try:
-        result = supabase.table('customers').select('*').order('name').execute()
+        result = supabase.table('customers').select('*').order('customer_name').execute()
         return {
             "status": "success",
             "count": len(result.data),
