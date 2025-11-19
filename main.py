@@ -559,6 +559,44 @@ def delete_batch(batch_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============================================================================
+# Products Endpoints
+# ============================================================================
+
+@app.get("/api/products", dependencies=[Depends(verify_api_key)])
+def get_all_products():
+    """Get all products from Supabase"""
+    try:
+        result = supabase.table('products').select('*').order('name').execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "products": result.data
+        }
+    except Exception as e:
+        print(f">>> API: Error fetching products: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Customers Endpoints
+# ============================================================================
+
+@app.get("/api/customers", dependencies=[Depends(verify_api_key)])
+def get_all_customers():
+    """Get all customers from Supabase"""
+    try:
+        result = supabase.table('customers').select('*').order('name').execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "customers": result.data
+        }
+    except Exception as e:
+        print(f">>> API: Error fetching customers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
 # Activity Log Endpoints (Automatic sync)
 # ============================================================================
 
