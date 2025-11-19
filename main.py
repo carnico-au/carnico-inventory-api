@@ -568,6 +568,89 @@ def delete_batch(batch_id: int):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/batches/{batch_id}/toggle-status", dependencies=[Depends(verify_api_key)])
+def toggle_batch_status(batch_id: int):
+    """Toggle batch status between Open and Closed"""
+    try:
+        # Get current batch
+        result = supabase.table('batches').select('*').eq('batch_id', batch_id).execute()
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Batch not found")
+        
+        batch = result.data[0]
+        new_status = "Closed" if batch['status'] == "Open" else "Open"
+        
+        # Update status
+        update_result = supabase.table('batches').update({"status": new_status}).eq('batch_id', batch_id).execute()
+        
+        # Log activity
+        log_activity("batch_status_change", f"Changed batch #{batch_id} status from {batch['status']} to {new_status}")
+        
+        return {
+            "status": "success",
+            "message": f"Batch #{batch_id} status changed to {new_status}",
+            "batch": update_result.data[0]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f">>> API: Error toggling batch status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/labels/{barcode}/move", dependencies=[Depends(verify_api_key)])
+def move_label(barcode: str, data: dict):
+    """Move a label to a different batch"""
+    try:
+        target_batch_id = data.get('target_batch_id')
+        if not target_batch_id:
+            raise HTTPException(status_code=400, detail="target_batch_id is required")
+        
+        # Get current label
+        label_result = supabase.table('labels').select('*').eq('barcode', barcode).execute()
+        if not label_result.data:
+            raise HTTPException(status_code=404, detail="Label not found")
+        
+        old_batch_id = label_result.data[0].get('batch_id')
+        
+        # Verify target batch exists
+        batch_result = supabase.table('batches').select('batch_id').eq('batch_id', target_batch_id).execute()
+        if not batch_result.data:
+            raise HTTPException(status_code=404, detail="Target batch not found")
+        
+        # Move label
+        update_result = supabase.table('labels').update({"batch_id": target_batch_id}).eq('barcode', barcode).execute()
+        
+        # Log activity
+        log_activity("move_label", f"Moved label {barcode} from batch #{old_batch_id} to batch #{target_batch_id}")
+        
+        return {
+            "status": "success",
+            "message": f"Label moved from batch #{old_batch_id} to batch #{target_batch_id}",
+            "label": update_result.data[0]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f">>> API: Error moving label: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/batches/{batch_id}/activity", dependencies=[Depends(verify_api_key)])
+def get_batch_activity(batch_id: int):
+    """Get activity log for a specific batch"""
+    try:
+        # Get activities related to this batch
+        result = supabase.table('activity_log').select('*').ilike('details', f'%batch #{batch_id}%').order('timestamp', desc=True).limit(100).execute()
+        
+        return {
+            "status": "success",
+            "batch_id": batch_id,
+            "count": len(result.data),
+            "activities": result.data
+        }
+    except Exception as e:
+        print(f">>> API: Error fetching batch activity: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # ============================================================================
 # Products Endpoints
 # ============================================================================
@@ -735,6 +818,75 @@ def get_batch_labels(batch_id: int):
         }
     except Exception as e:
         print(f">>> API: Error fetching labels for batch #{batch_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/labels", dependencies=[Depends(verify_api_key)])
+def create_label(label: dict):
+    """Create a new label"""
+    try:
+        # Insert label
+        result = supabase.table('labels').insert(label).execute()
+        
+        # Log activity
+        log_activity("add_label", f"Added label {label.get('barcode')} to batch {label.get('batch_id')}")
+        
+        return {
+            "status": "success",
+            "message": "Label created successfully",
+            "label": result.data[0] if result.data else None
+        }
+    except Exception as e:
+        print(f">>> API: Error creating label: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/labels/{barcode}", dependencies=[Depends(verify_api_key)])
+def update_label(barcode: str, label: dict):
+    """Update an existing label"""
+    try:
+        # Update label
+        result = supabase.table('labels').update(label).eq('barcode', barcode).execute()
+        
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Label not found")
+        
+        # Log activity
+        log_activity("update_label", f"Updated label {barcode}")
+        
+        return {
+            "status": "success",
+            "message": "Label updated successfully",
+            "label": result.data[0]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f">>> API: Error updating label {barcode}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/labels/{barcode}", dependencies=[Depends(verify_api_key)])
+def delete_label(barcode: str):
+    """Delete a label"""
+    try:
+        # Get label info before deleting for logging
+        label_result = supabase.table('labels').select('*').eq('barcode', barcode).execute()
+        
+        if not label_result.data:
+            raise HTTPException(status_code=404, detail="Label not found")
+        
+        # Delete label
+        supabase.table('labels').delete().eq('barcode', barcode).execute()
+        
+        # Log activity
+        log_activity("delete_label", f"Deleted label {barcode} from batch {label_result.data[0].get('batch_id')}")
+        
+        return {
+            "status": "success",
+            "message": "Label deleted successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f">>> API: Error deleting label {barcode}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/products", dependencies=[Depends(verify_api_key)])
