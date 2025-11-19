@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import hashlib
 import json
@@ -99,6 +99,16 @@ class ActivityLog(BaseModel):
     timestamp: str
     user: Optional[str] = None
     details: Optional[Dict[str, Any]] = None
+
+class CreateBatch(BaseModel):
+    customer: str
+    specie: str
+    date: str
+
+class UpdateBatch(BaseModel):
+    customer: Optional[str] = None
+    specie: Optional[str] = None
+    status: Optional[str] = None
 
 class DeletionLog(BaseModel):
     barcode: str
@@ -580,6 +590,170 @@ def get_all_products():
 # ============================================================================
 # Customers Endpoints
 # ============================================================================
+
+@app.get("/api/customers", dependencies=[Depends(verify_api_key)])
+def get_all_customers():
+    """Get all customers from Supabase"""
+    try:
+        result = supabase.table('customers').select('*').order('name').execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "customers": result.data
+        }
+    except Exception as e:
+        print(f">>> API: Error fetching customers: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Web App Endpoints
+# ============================================================================
+
+@app.get("/api/dashboard-stats", dependencies=[Depends(verify_api_key)])
+def get_dashboard_stats():
+    """Get statistics for the web dashboard"""
+    try:
+        # 1. Get open batches count
+        open_batches_result = supabase.table('batches').select('batch_id', count='exact').eq('status', 'Open').execute()
+        open_batches_count = open_batches_result.count if open_batches_result.count is not None else 0
+
+        # 2. Get labels printed today
+        today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = today_start + timedelta(days=1)
+        
+        labels_today_result = supabase.table('activity_log').select('id', count='exact').in_('action', ['print_label', 'reprint_label']).gte('timestamp', today_start.isoformat()).lt('timestamp', today_end.isoformat()).execute()
+        labels_today_count = labels_today_result.count if labels_today_result.count is not None else 0
+
+        # 3. Get total products count
+        products_result = supabase.table('products').select('id', count='exact').execute()
+        products_count = products_result.count if products_result.count is not None else 0
+
+        # 4. Get recent activity count (today)
+        activity_today_result = supabase.table('activity_log').select('id', count='exact').gte('timestamp', today_start.isoformat()).lt('timestamp', today_end.isoformat()).execute()
+        activity_today_count = activity_today_result.count if activity_today_result.count is not None else 0
+        
+        return {
+            "status": "success",
+            "stats": {
+                "open_batches": open_batches_count,
+                "labels_today": labels_today_count,
+                "total_products": products_count,
+                "activities_today": activity_today_count
+            }
+        }
+    except Exception as e:
+        print(f">>> API: Error fetching dashboard stats: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/batches", dependencies=[Depends(verify_api_key)])
+def get_all_batches():
+    """Get all batches from Supabase"""
+    try:
+        result = supabase.table('batches').select('*').order('batch_id', desc=True).execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "batches": result.data
+        }
+    except Exception as e:
+        print(f">>> API: Error fetching batches: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/batches", dependencies=[Depends(verify_api_key)])
+def create_new_batch(batch_data: CreateBatch):
+    """Create a new batch in Supabase"""
+    try:
+        # Get the latest batch_id to increment it
+        latest_batch = supabase.table('batches').select('batch_id').order('batch_id', desc=True).limit(1).execute()
+        new_batch_id = (latest_batch.data[0]['batch_id'] + 1) if latest_batch.data else 1
+
+        new_batch = {
+            'batch_id': new_batch_id,
+            'date': batch_data.date,
+            'customer': batch_data.customer,
+            'specie': batch_data.specie,
+            'status': 'Open',
+            'label_count': 0,
+            'total_weight': 0,
+            'total_amount': 0
+        }
+
+        result = supabase.table('batches').insert(new_batch).execute()
+
+        # Log this activity
+        log_entry = {
+            'action': 'add_batch_web',
+            'timestamp': datetime.now().isoformat(),
+            'user': 'webapp',
+            'details': {
+                'batch_id': new_batch_id,
+                'customer': batch_data.customer,
+                'specie': batch_data.specie
+            }
+        }
+        supabase.table('activity_log').insert(log_entry).execute()
+
+        return {"status": "success", "batch": result.data[0]}
+    except Exception as e:
+        print(f">>> API: Error creating batch: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/batches/{batch_id}", dependencies=[Depends(verify_api_key)])
+def update_batch(batch_id: int, batch_data: UpdateBatch):
+    """Update an existing batch in Supabase"""
+    try:
+        # Build the update object with only provided fields
+        update_data = {}
+        if batch_data.customer is not None:
+            update_data['customer'] = batch_data.customer
+        if batch_data.specie is not None:
+            update_data['specie'] = batch_data.specie
+        if batch_data.status is not None:
+            update_data['status'] = batch_data.status
+
+        if not update_data:
+            raise HTTPException(status_code=400, detail="No fields to update")
+
+        result = supabase.table('batches').update(update_data).eq('batch_id', batch_id).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail=f"Batch #{batch_id} not found")
+
+        # Log this activity
+        log_entry = {
+            'action': 'update_batch_web',
+            'timestamp': datetime.now().isoformat(),
+            'user': 'webapp',
+            'details': {
+                'batch_id': batch_id,
+                'updates': update_data
+            }
+        }
+        supabase.table('activity_log').insert(log_entry).execute()
+
+        return {"status": "success", "batch": result.data[0]}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f">>> API: Error updating batch: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/products", dependencies=[Depends(verify_api_key)])
+def get_all_products():
+    """Get all products from Supabase"""
+    try:
+        result = supabase.table('products').select('*').order('name').execute()
+        return {
+            "status": "success",
+            "count": len(result.data),
+            "products": result.data
+        }
+    except Exception as e:
+        print(f">>> API: Error fetching products: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/customers", dependencies=[Depends(verify_api_key)])
 def get_all_customers():
