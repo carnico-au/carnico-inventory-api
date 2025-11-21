@@ -116,6 +116,10 @@ class UpdateBatch(BaseModel):
     status: Optional[str] = None
     date: Optional[str] = None
 
+class BulkUpdateProducts(BaseModel):
+    product_codes: List[str]
+    updates: Dict[str, Any]  # Fields to update: expiry_days, specie, grade, price, is_active
+
 class DeletionLog(BaseModel):
     barcode: str
     product_name: str
@@ -932,6 +936,11 @@ def get_all_products():
 def create_product(product: Product):
     """Create a new product"""
     try:
+        # Check for duplicate product code
+        existing = supabase.table('products').select('product_code').eq('product_code', product.product_code).execute()
+        if existing.data:
+            raise HTTPException(status_code=400, detail=f"Product code '{product.product_code}' already exists")
+        
         product_dict = product.dict()
         result = supabase.table('products').insert(product_dict).execute()
         
@@ -945,6 +954,8 @@ def create_product(product: Product):
         supabase.table('activity_log').insert(log_entry).execute()
         
         return {"status": "success", "product": result.data[0]}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f">>> API: Error creating product: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -953,6 +964,12 @@ def create_product(product: Product):
 def update_product(product_code: str, product: Product):
     """Update an existing product"""
     try:
+        # If product code is changing, check for duplicates
+        if product.product_code != product_code:
+            existing = supabase.table('products').select('product_code').eq('product_code', product.product_code).execute()
+            if existing.data:
+                raise HTTPException(status_code=400, detail=f"Product code '{product.product_code}' already exists")
+        
         product_dict = product.dict()
         result = supabase.table('products').update(product_dict).eq('product_code', product_code).execute()
         
@@ -998,6 +1015,54 @@ def delete_product(product_code: str):
         raise
     except Exception as e:
         print(f">>> API: Error deleting product: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/products/bulk-update", dependencies=[Depends(verify_api_key)])
+def bulk_update_products(bulk_update: BulkUpdateProducts):
+    """Bulk update multiple products"""
+    try:
+        updated_count = 0
+        errors = []
+        
+        # Validate update fields
+        allowed_fields = {'expiry_days', 'specie', 'grade', 'price', 'is_active'}
+        update_fields = {k: v for k, v in bulk_update.updates.items() if k in allowed_fields}
+        
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No valid fields to update")
+        
+        # Update each product
+        for product_code in bulk_update.product_codes:
+            try:
+                result = supabase.table('products').update(update_fields).eq('product_code', product_code).execute()
+                if result.data:
+                    updated_count += 1
+                else:
+                    errors.append(f"Product {product_code} not found")
+            except Exception as e:
+                errors.append(f"Product {product_code}: {str(e)}")
+        
+        # Log activity
+        log_entry = {
+            'action': 'bulk_update_products',
+            'timestamp': datetime.now().isoformat(),
+            'user': 'webapp',
+            'details': {
+                'count': updated_count,
+                'fields': list(update_fields.keys())
+            }
+        }
+        supabase.table('activity_log').insert(log_entry).execute()
+        
+        return {
+            "status": "success",
+            "updated": updated_count,
+            "errors": errors
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f">>> API: Error bulk updating products: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/customers", dependencies=[Depends(verify_api_key)])
